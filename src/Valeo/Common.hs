@@ -2,7 +2,6 @@
 
 module Valeo.Common where
 
-import           Data.Semiring
 import           Data.Text           (Text)
 import qualified Data.Text           as T
 import           Data.Text.Encoding  as T (encodeUtf8)

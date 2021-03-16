@@ -4,10 +4,10 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 1e2704971be35600306f43d0bf5abbbd9b6301a0dea712032239448e3d92d58d
+-- hash: ae656eee69e286e379a874ca51dbb561bec44a7ac1ab6d59b925fcb86e08057d
 
 name:           valeo
-version:        0.1.0.0
+version:        0.1.1
 synopsis:       A simple validator for web applications.
 description:    Please see the README on GitHub at <https://github.com/Alias Qli/valeo#readme>
 category:       Web

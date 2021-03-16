@@ -2,9 +2,10 @@
 {-# LANGUAGE OverloadedStrings    #-}
 {-# LANGUAGE TypeFamilies         #-}
 {-# LANGUAGE TypeSynonymInstances #-}
-module Valeo where
 
-import           Data.Semiring as Export (Semiring (..))
+module Valeo(module Valeo, module Data.Semiring) where
+
+import           Data.Semiring
 import           Data.Text     (Text)
 import qualified Data.Text     as T
 
