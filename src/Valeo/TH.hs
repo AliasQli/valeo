@@ -1,212 +1,286 @@
+{-# LANGUAGE LambdaCase      #-}
 {-# LANGUAGE MultiWayIf      #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TemplateHaskell #-}
 
-module Valeo.TH (makeValidateMethod) where
 
-import           Control.Monad                (forM)
+{-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-}
+module Valeo.TH where
+
+import           Control.Monad                (forM, unless)
 import           Data.Char                    (toLower)
 import           Data.Functor                 (($>))
-import           Data.Text                    (Text)
 import qualified Data.Text                    as T
 import           Language.Haskell.TH
 import           Language.Haskell.TH.Datatype
 import           Valeo
 
-nameBV :: Name -> Name
-nameBV name = mkName (nameBase name ++ "V")
-
-nameBC :: Name -> Name
-nameBC name = mkName (nameBase name ++ "C")
-
-nameSC :: Name -> Name
-nameSC name = mkName $ lowerHead (nameBase name ++ "C")
-
-defNameC :: Name -> Name
-defNameC name = mkName $ "default" ++ nameBase name ++ "C"
-
 lowerHead :: [Char] -> [Char]
 lowerHead (x : xs) = toLower x : xs
 lowerHead _        = undefined
 
-toVarT :: TyVarBndr -> Type
-toVarT (PlainTV nm)     = VarT nm
-toVarT (KindedTV nm _k) = VarT nm
+mapName :: (String -> String) -> Name -> Name
+mapName f = mkName . f . nameBase
 
-mkType :: Type -> [TyVarBndr] -> Type
-mkType = foldl (\a b -> a `AppT` toVarT b)
+nameDef :: Name -> Name
+nameDef = mapName ("default" ++)
 
-makeV :: DatatypeInfo -> Dec
-makeV DatatypeInfo{..} =
-  if
-    | [ConstructorInfo{..}] <- datatypeCons ->
-      NewtypeD
+nameV :: Name -> Name
+nameV = mapName (++ "V")
+
+nameC :: Name -> Name
+nameC = mapName (++ "C")
+
+nameSC :: Name -> Name
+nameSC = mapName $ lowerHead . (++ "C")
+
+-- | Consists of 'makeSMethod', 'makeSDef', 'makeSInstQ'.
+-- Applies to those types who have only __one record constructor__.
+makeValeo :: Name -> DecsQ
+makeValeo nm = do
+  let isRecordConstructor = \case
+        RecordConstructor _ -> True
+        _                   -> False
+  info@DatatypeInfo{..} <- reifyDatatype nm
+  unless (length datatypeCons == 1) $ fail "The datatype should have exactly 1 value constructor"
+  let [ConstructorInfo{..}] = datatypeCons
+  unless (isRecordConstructor constructorVariant) $ fail "The value constructor should have records"
+  let mth = makeSMethod info
+      (sig, def) = makeSDef info
+  inst <- makeSInstQ info
+  return [mth, sig, def, inst]
+
+-- | Generate the corresponding validate method datatype for the given type.
+makeSMethod :: DatatypeInfo -> Dec
+makeSMethod DatatypeInfo{..}
+  | [ConstructorInfo{..}] <- datatypeCons
+  , RecordConstructor nms <- constructorVariant =
+    let fields = zip nms constructorFields
+    in if length fields == 1
+      then NewtypeD
         []
-        nameV
+        nmV
         datatypeVars
         Nothing
-        mkCon
+        (conV fields)
         []
-    | otherwise ->
-      DataD
+      else DataD
         []
-        nameV
+        nmV
         datatypeVars
         Nothing
-        [mkCon]
+        [conV fields]
         []
+  | otherwise = undefined
   where
-    nameV = nameBV datatypeName
-    mkCon =
-      RecC
-        nameV
-        (mkField <$> datatypeCons)
-    mkField ConstructorInfo{..} =
-      ( nameSC constructorName
+    nmV = nameV datatypeName
+    conV fields = RecC
+      nmV
+      (fieldV <$> fields)
+    fieldV (nm, ty) =
+      ( nameV nm
       , Bang NoSourceUnpackedness NoSourceStrictness
-      , mkType (ConT (nameBC constructorName)) datatypeVars
+      , ConT ''Validator `AppT` ty
       )
 
-makeC :: [TyVarBndr] -> ConstructorInfo -> Dec
-makeC datatypeVars ConstructorInfo{..} =
-  if
-    | [_] <- constructorFields ->
-      NewtypeD
-        []
-        name
-        datatypeVars
-        Nothing
-        mkCon
-        []
-    | otherwise ->
-      DataD
-        []
-        name
-        datatypeVars
-        Nothing
-        [mkCon]
-        []
-  where
-    mkCon =
-      if
-        | RecordConstructor names <- constructorVariant ->
-          RecC
-            name
-            (mkField <$> zip names constructorFields)
-        | otherwise ->
-          NormalC
-            name
-            (mkField' <$> constructorFields)
-    mkField (name, field) =
-      ( nameBV name
-      , Bang NoSourceUnpackedness NoSourceStrictness
-      , ConT ''Validator `AppT` field
-      )
-    mkField' field =
-      ( Bang NoSourceUnpackedness NoSourceStrictness
-      , ConT ''Validator `AppT` field
-      )
-    name = nameBC constructorName
+-- | Generate the corresponding default value for the given type.
+makeSDef :: DatatypeInfo -> (Dec, Dec)
+makeSDef DatatypeInfo{..}
+  | [ConstructorInfo{..}] <- datatypeCons =
+    let nmV = nameV datatypeName
+        nmDef = nameDef nmV
+        body = NormalB $
+          foldl AppE (ConE nmV) (constructorFields $> VarE 'mempty)
+        def = ValD
+          (VarP nmDef)
+          body
+          []
+        sig = SigD nmDef (ConT nmV)
+    in (sig, def)
+  | otherwise = undefined
 
-makeInstance :: Name -> [ConstructorInfo] -> Q Dec
-makeInstance name datatypeCons = do
-  let nameV = nameBV name
-      t = TySynInstD $ TySynEqn Nothing (ConT ''Validated `AppT` ConT nameV) (ConT name)
-  clauses <- forM (zip [0..] datatypeCons) $ \(ix, ConstructorInfo{..}) -> do
-    nms <- sequence $ constructorFields $> ((,) <$> newName "v" <*> newName "x")
-    let (vs, xs) = unzip nms
-        cConP = ConP (nameBC constructorName) (VarP <$> vs)
-        aConP = ConP constructorName (VarP <$> xs)
-        vConP = ConP nameV (replicate ix WildP ++ [cConP] ++ replicate (length datatypeCons - ix - 1) WildP)
-        apps = makeApp <$> zip [0..] nms
-          where
-            makeApp (i, (f, x)) =
-              UInfixE
-                (VarE 'T.pack `AppE` LitE (stringL text))
-                (VarE '(-:>))
-                (VarE f `AppE` VarE x)
-              where
-                text = case constructorVariant of
-                      RecordConstructor names -> concat [nameBase constructorName, ".", nameBase (names !! i), " "]
-                      _                       -> concat [nameBase constructorName, ".field", show i, " "]
-        body = NormalB (foldr1 (\a b -> UInfixE a (VarE '(<>)) b) apps)
-    return $
-      Clause
-        [vConP, aConP]
-        body
-        []
-  let f = FunD 'makeValidator clauses
-  return $ InstanceD
-    Nothing
-    []
-    (ConT ''ValidateMethod `AppT` ConT nameV)
-    [t, f]
+-- | Generate its 'Validatable' instance for the given type.
+makeSInstQ :: DatatypeInfo -> Q Dec
+makeSInstQ DatatypeInfo{..}= do
+  let nmDat = datatypeName
+      nmV = nameV nmDat
+      tyFamDef = TySynInstD $ TySynEqn Nothing (ConT ''ValidateMethod `AppT` ConT nmDat) (ConT nmV)
+      [ConstructorInfo{..}] = datatypeCons
+      nmCon = constructorName
+  vs <- forM constructorFields $ \_ -> newName "v"
+  xs <- forM constructorFields $ \_ -> newName "x"
+  let vConP = ConP nmV (VarP <$> vs)
+      xConP = ConP nmCon (VarP <$> xs)
+      apps = makeApp <$> zip3 [0..] vs xs
+        where
+          makeApp (i, f, x) =
+            UInfixE
+              (VarE 'T.pack `AppE` LitE (stringL text))
+              (VarE '(-:>))
+              (VarE f `AppE` VarE x)
+            where
+              RecordConstructor names = constructorVariant
+              text = concat [nameBase nmCon, ".", nameBase (names !! i), " "]
+      body = NormalB (foldr1 (\a b -> UInfixE a (VarE '(<.>)) b) apps)
+      clause1 =
+        Clause
+          [vConP, xConP]
+          body
+          []
+      validateByDef = FunD 'validateBy [clause1]
+  return $
+    InstanceD
+      Nothing
+      []
+      (ConT ''Validatable `AppT` ConT nmDat)
+      [tyFamDef, validateByDef]
 
-makeDefV :: DatatypeInfo -> Dec
-makeDefV DatatypeInfo{..} =
-  ValD
-    (VarP (mkName $ "default" ++ nameBase datatypeName ++ "V"))
-    body
-    []
-  where
-    body = NormalB $
-      foldl f (ConE (nameBV datatypeName)) datatypeCons
-    f e ConstructorInfo{..} = e `AppE` VarE (defNameC constructorName)
+-- defNameC :: Name -> Name
+-- defNameC name = mkName $ "default" ++ nameBase name ++ "C"
 
-makeDefC :: ConstructorInfo -> Dec
-makeDefC ConstructorInfo{..} =
-  ValD
-    (VarP (defNameC constructorName))
-    body
-    []
-  where
-    body = NormalB $
-      foldl f (ConE (nameBC constructorName)) (constructorFields $> 'mempty)
-    f e x = e `AppE` VarE x
+-- toVarT :: TyVarBndr -> Type
+-- toVarT (PlainTV nm)     = VarT nm
+-- toVarT (KindedTV nm _k) = VarT nm
 
--- No support for infix constructors.
--- TODO: Add error msg.
-makeValidateMethod :: Name -> DecsQ
-makeValidateMethod name = do
-  info@DatatypeInfo{..} <- reifyDatatype name
-  let v = makeV info
-      cs = makeC datatypeVars <$> datatypeCons
-      defV = makeDefV info
-      defCs = makeDefC <$> datatypeCons
-  i <- makeInstance name datatypeCons
-  return (i : v : defV : cs ++ defCs)
+-- mkType :: Type -> [TyVarBndr] -> Type
+-- mkType = foldl (\a b -> a `AppT` toVarT b)
 
+-- makeV :: DatatypeInfo -> Dec
+-- makeV DatatypeInfo{..} =
+--   if
+--     | [ConstructorInfo{..}] <- datatypeCons ->
+--       NewtypeD
+--         []
+--         nameV
+--         datatypeVars
+--         Nothing
+--         conV
+--         []
+--     | otherwise ->
+--       DataD
+--         []
+--         nameV
+--         datatypeVars
+--         Nothing
+--         [conV]
+--         []
+--   where
+--     nameV = nameBV datatypeName
+--     conV =
+--       RecC
+--         nameV
+--         (fieldV <$> datatypeCons)
+--     fieldV ConstructorInfo{..} =
+--       ( nameSC constructorName
+--       , Bang NoSourceUnpackedness NoSourceStrictness
+--       , mkType (ConT (nameBC constructorName)) datatypeVars
+--       )
 
--- Sample code generated:
+-- makeC :: [TyVarBndr] -> ConstructorInfo -> Dec
+-- makeC datatypeVars ConstructorInfo{..} =
+--   if
+--     | [_] <- constructorFields ->
+--       NewtypeD
+--         []
+--         name
+--         datatypeVars
+--         Nothing
+--         conV
+--         []
+--     | otherwise ->
+--       DataD
+--         []
+--         name
+--         datatypeVars
+--         Nothing
+--         [conV]
+--         []
+--   where
+--     conV =
+--       if
+--         | RecordConstructor names <- constructorVariant ->
+--           RecC
+--             name
+--             (fieldV <$> zip names constructorFields)
+--         | otherwise ->
+--           NormalC
+--             name
+--             (fieldV' <$> constructorFields)
+--     fieldV (name, field) =
+--       ( nameBV name
+--       , Bang NoSourceUnpackedness NoSourceStrictness
+--       , ConT ''Validator `AppT` field
+--       )
+--     fieldV' field =
+--       ( Bang NoSourceUnpackedness NoSourceStrictness
+--       , ConT ''Validator `AppT` field
+--       )
+--     name = nameBC constructorName
 
--- data UserC
---   = UserC
---     { nameV :: Validator Text
---     , ageV  :: Validator Int
---     }
+-- makeInstance :: Name -> [ConstructorInfo] -> Q Dec
+-- makeInstance name datatypeCons = do
+--   let nameV = nameBV name
+--       t = TySynInstD $ TySynEqn Nothing (ConT ''Validated `AppT` ConT nameV) (ConT name)
+--   clauses <- forM (zip [0..] datatypeCons) $ \(ix, ConstructorInfo{..}) -> do
+--     nms <- sequence $ constructorFields $> ((,) <$> newName "v" <*> newName "x")
+--     let (vs, xs) = unzip nms
+--         cConP = ConP (nameBC constructorName) (VarP <$> vs)
+--         aConP = ConP constructorName (VarP <$> xs)
+--         vConP = ConP nameV (replicate ix WildP ++ [cConP] ++ replicate (length datatypeCons - ix - 1) WildP)
+--         apps = makeApp <$> zip [0..] nms
+--           where
+--             makeApp (i, (f, x)) =
+--               UInfixE
+--                 (VarE 'T.pack `AppE` LitE (stringL text))
+--                 (VarE '(-:>))
+--                 (VarE f `AppE` VarE x)
+--               where
+--                 text = case constructorVariant of
+--                       RecordConstructor names -> concat [nameBase constructorName, ".", nameBase (names !! i), " "]
+--                       _                       -> concat [nameBase constructorName, ".field", show i, " "]
+--         body = NormalB (foldr1 (\a b -> UInfixE a (VarE '(<>)) b) apps)
+--     return $
+--       Clause
+--         [vConP, aConP]
+--         body
+--         []
+--   let f = FunD 'makeValidator clauses
+--   return $ InstanceD
+--     Nothing
+--     []
+--     (ConT ''ValidateMethod `AppT` ConT nameV)
+--     [t, f]
 
--- defaultUserC :: UserC
--- defaultUserC = UserC mempty mempty
+-- makeDefV :: DatatypeInfo -> Dec
+-- makeDefV DatatypeInfo{..} =
+--   ValD
+--     (VarP (mkName $ "default" ++ nameBase datatypeName ++ "V"))
+--     body
+--     []
+--   where
+--     body = NormalB $
+--       foldl f (ConE (nameBV datatypeName)) datatypeCons
+--     f e ConstructorInfo{..} = e `AppE` VarE (defNameC constructorName)
 
--- data AdminC
---   = AdminC
---     { nameV       :: Validator Text
---     , permissionV :: Validator Int
---     }
+-- makeDefC :: ConstructorInfo -> Dec
+-- makeDefC ConstructorInfo{..} =
+--   ValD
+--     (VarP (defNameC constructorName))
+--     body
+--     []
+--   where
+--     body = NormalB $
+--       foldl f (ConE (nameBC constructorName)) (constructorFields $> 'mempty)
+--     f e x = e `AppE` VarE x
 
--- defaultAdminC :: AdminC
--- defaultAdminC = AdminC mempty mempty
-
--- data UserV
---   = UserV
---     { userC  :: UserC
---     , adminC :: AdminC
---     }
-
--- defaultUserV :: UserV
--- defaultUserV = UserV defaultUserC defaultAdminC
-
--- instance ValidateInfo UserV where
---   type Validated UserV = User
---   makeValidator (UserV (UserC nameV ageV) _)         (User name age)         = "User.name " -:> nameV name <> "User.age " -:> ageV age
---   makeValidator (UserV _ (AdminC nameV permissionV)) (Admin name permission) = "Admin.name " -:> nameV name <> "Admin.permission " -:> permissionV permission
+-- -- No support for infix constructors.
+-- -- TODO: Add error msg.
+-- makeValidateMethod :: Name -> DecsQ
+-- makeValidateMethod name = do
+--   info@DatatypeInfo{..} <- reifyDatatype name
+--   let v = makeV info
+--       cs = makeC datatypeVars <$> datatypeCons
+--       defV = makeDefV info
+--       defCs = makeDefC <$> datatypeCons
+--   i <- makeInstance name datatypeCons
+--   return (i : v : defV : cs ++ defCs)

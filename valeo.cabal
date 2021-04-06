@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: ae656eee69e286e379a874ca51dbb561bec44a7ac1ab6d59b925fcb86e08057d
+-- hash: 590b3bc8f435bff2d326d4cd2907f477fe52a2ce6743cb34c07541f446663f75
 
 name:           valeo
 version:        0.1.1
@@ -28,11 +28,13 @@ library
   exposed-modules:
       Valeo
       Valeo.Common
+      Valeo.Semiring
       Valeo.TH
   other-modules:
       Paths_valeo
   hs-source-dirs:
       src
+  ghc-options: -Wall -Wcompat -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints
   build-depends:
       base >=4.7 && <5
     , email-validate
@@ -49,7 +51,7 @@ test-suite valeo-test
       Paths_valeo
   hs-source-dirs:
       test
-  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  ghc-options: -Wall -Wcompat -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
     , email-validate
